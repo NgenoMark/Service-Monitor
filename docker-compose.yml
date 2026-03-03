@@ -1,0 +1,116 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./monitoring/postgres/init:/docker-entrypoint-initdb.d:ro
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  postgres-populator-python:
+    build:
+      context: .
+      dockerfile: monitoring/postgres/populator/python/Dockerfile
+    container_name: postgres_populator_python
+    environment:
+      DB_HOST: ${POSTGRES_HOST}
+      DB_PORT: ${POSTGRES_PORT}
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      POPULATOR_INTERVAL_SECONDS: ${PYTHON_POPULATOR_INTERVAL_SECONDS}
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles:
+      - populate-python
+
+  # Shell populator intentionally disabled to avoid collision with the Python populator.
+  # Keep scripts under monitoring/postgres/populator/shell for reference/reuse.
+  #
+  # postgres-populator-shell:
+  #   image: postgres:16
+  #   container_name: postgres_populator_shell
+  #   entrypoint: ["/bin/bash", "/scripts/populate.sh"]
+  #   environment:
+  #     DB_HOST: ${POSTGRES_HOST}
+  #     DB_PORT: ${POSTGRES_PORT}
+  #     DB_NAME: ${POSTGRES_DB}
+  #     DB_USER: ${POSTGRES_USER}
+  #     DB_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POPULATOR_INTERVAL_SECONDS: ${SHELL_POPULATOR_INTERVAL_SECONDS}
+  #   depends_on:
+  #     - postgres
+  #   volumes:
+  #     - ./monitoring/postgres/populator/shell:/scripts:ro
+  #   restart: unless-stopped
+  #   profiles:
+  #     - populate-shell
+
+  service-monitor-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: service_monitor_backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+    restart: unless-stopped
+    depends_on:
+      - service-monitor-backend
+
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: alertmanager
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.local.yml
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.local.yml:/etc/alertmanager/alertmanager.local.yml:ro
+      - ./monitoring/alertmanager/templates:/etc/alertmanager/templates:ro
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana-data:/var/lib/grafana
+    environment:
+      GF_SMTP_ENABLED: ${GF_SMTP_ENABLED}
+      GF_SMTP_HOST: ${SMTP_HOST}
+      GF_SMTP_USER: ${SMTP_USER}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM}
+      GF_SMTP_FROM_NAME: ${GF_SMTP_FROM_NAME}
+      GF_SMTP_SKIP_VERIFY: ${GF_SMTP_SKIP_VERIFY}
+
+
+
+volumes:
+  grafana-data:
+  postgres-data:
