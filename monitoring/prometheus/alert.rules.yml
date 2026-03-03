@@ -1,0 +1,36 @@
+groups:
+  - name: service-monitor.rules
+    rules:
+      - alert: BackendDown
+        expr: up{job="service_monitor_backend"} < 1
+        for: 2m
+        labels:
+          service: service-monitor-backend
+          severity: critical
+          env: local
+#        annotations:
+#          summary: "Backend service is unavailable"
+#          description: "Prometheus target has been down for 2 minutes."
+#          runbook_url: "http://localhost:3000/d/service-monitor-backend"
+        annotations:
+          summary: "Backend availability threshold breached"
+          description: "up{job=\"service_monitor_backend\"} < 1 for 2m (fires when unavailable, resolves when restored)."
+          runbook_url: "http://localhost:3000/d/service-monitor-backend"
+
+
+      - alert: High5xxRate
+        expr: sum(rate(http_server_requests_seconds_count{job="service_monitor_backend",status=~"5.."}[1m])) > 1
+        for: 2m
+        labels:
+          service: service-monitor-backend
+          severity: warning
+          env: local
+#        annotations:
+#          summary: "Elevated 5xx error rate"
+#          description: "Backend 5xx error rate exceeded threshold for 2 minutes."
+#          runbook_url: "http://localhost:3000/d/service-monitor-backend"
+        annotations:
+          summary: "Backend error-rate threshold breached"
+          description: "5xx rate exceeded configured threshold for 2m (fires on sustained errors, resolves when recovered)."
+          runbook_url: "http://localhost:3000/d/service-monitor-backend"
+

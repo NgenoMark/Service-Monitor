@@ -1,0 +1,32 @@
+{{ define "service_monitor.text" -}}
+{{- if eq .Status "resolved" }}
+Service recovery detected.
+
+Alert: {{ .CommonLabels.alertname }}
+Service: {{ .CommonLabels.service }}
+Severity: {{ .CommonLabels.severity }}
+Environment: {{ .CommonLabels.env }}
+
+Summary: Service is available again and alert condition cleared.
+{{- if gt (len .Alerts.Resolved) 0 }}
+Recovered At: {{ (index .Alerts.Resolved 0).EndsAt }}
+Started At: {{ (index .Alerts.Resolved 0).StartsAt }}
+{{- end }}
+Runbook: {{ .CommonAnnotations.runbook_url }}
+
+{{- else }}
+Service incident detected.
+
+Alert: {{ .CommonLabels.alertname }}
+Service: {{ .CommonLabels.service }}
+Severity: {{ .CommonLabels.severity }}
+Environment: {{ .CommonLabels.env }}
+
+Summary: {{ .CommonAnnotations.summary }}
+Description: {{ .CommonAnnotations.description }}
+{{- if gt (len .Alerts.Firing) 0 }}
+Started At: {{ (index .Alerts.Firing 0).StartsAt }}
+{{- end }}
+Runbook: {{ .CommonAnnotations.runbook_url }}
+{{- end }}
+{{- end }}
