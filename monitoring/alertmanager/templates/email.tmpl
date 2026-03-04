@@ -1,3 +1,11 @@
+{{ define "service_monitor.subject" -}}
+{{- if eq .Status "resolved" -}}
+[RESOLVED] {{ .CommonLabels.alertname }} recovered - {{ .CommonLabels.service }} ({{ .CommonLabels.env }})
+{{- else -}}
+[FIRING] {{ .CommonLabels.alertname }} active - {{ .CommonLabels.service }} ({{ .CommonLabels.severity }}, {{ .CommonLabels.env }})
+{{- end -}}
+{{- end }}
+
 {{ define "service_monitor.text" -}}
 {{- if eq .Status "resolved" }}
 Service recovery detected.

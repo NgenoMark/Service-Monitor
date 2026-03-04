@@ -3,15 +3,17 @@
 Spring Boot monitoring stack with:
 
 - Backend app (Spring Boot + Actuator + Prometheus metrics)
-- Prometheus (scraping backend metrics)
-- Grafana (dashboards + alerts + email notifications)
+- Prometheus (scrapes backend metrics and evaluates rules)
+- Alertmanager (native Prometheus email alerts)
+- Grafana (dashboards + Grafana-managed alerts + email)
 - PostgreSQL (additional Grafana datasource for SQL dashboards)
+- Python populator (writes live probe results into PostgreSQL)
 
 ## 1. Prerequisites
 
 - Docker Desktop running
 - Java 8 (for local backend runs outside Docker)
-- Ports available: `8081`, `9090`, `3000`, `5432`
+- Ports available: `8081`, `9090`, `9093`, `3000`, `5432`
 
 ## 2. Current Project Configuration
 
@@ -26,11 +28,19 @@ management.endpoint.prometheus.enabled=true
 management.endpoint.health.show-details=always
 ```
 
-### 2.2 Prometheus scrape config (`monitoring/prometheus/prometheus.yml`)
+### 2.2 Prometheus scrape + alerting (`monitoring/prometheus/prometheus.yml`)
 
 ```yaml
 global:
   scrape_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
 
 scrape_configs:
   - job_name: 'service_monitor_backend'
@@ -44,8 +54,10 @@ scrape_configs:
 Services:
 - `service-monitor-backend`
 - `prometheus`
+- `alertmanager`
 - `grafana`
 - `postgres`
+- `postgres-populator-python`
 
 Persisted volumes:
 - `grafana-data` (Grafana dashboards/datasources)
@@ -104,9 +116,12 @@ Prometheus:
 - `http://localhost:9090/targets`
 - job `service_monitor_backend` should be `UP`
 
+Alertmanager:
+- `http://localhost:9093`
+
 Grafana:
 - `http://localhost:3000`
-- Login and verify Prometheus datasource `Save & test`
+- verify Prometheus datasource `Save & test`
 
 PostgreSQL quick check:
 
@@ -170,167 +185,254 @@ docker compose stop service-monitor-backend
 docker compose start service-monitor-backend
 ```
 
-## 8. Suggested Grafana Panels
+## 8. Prometheus Dashboard (Recommended Panels)
 
-### 8.1 Prometheus dashboard
+### 8.1 Backend Status (Stat)
 
-- `up{job="service_monitor_backend"}`
-- `rate(http_server_requests_seconds_count[1m])`
-- `sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m]))`
-- `jvm_memory_used_bytes`
-- `jvm_threads_live_threads`
+```promql
+up{job="service_monitor_backend",instance="service-monitor-backend:8081"}
+```
 
-### 8.2 PostgreSQL dashboard (starter)
+Settings:
+- Calculation: `Last (not null)`
+- Text mode: `Value and name`
+- Value mappings: `0 -> DOWN`, `1 -> UP`
+- Thresholds: `0 red`, `1 green`
 
-Panel 1:
+### 8.2 Request Rate (Time series)
+
+```promql
+sum(rate(http_server_requests_seconds_count{job="service_monitor_backend"}[1m]))
+```
+
+Settings:
+- Unit: `reqps`
+- Min: `Auto` (recommended for visibility of small changes)
+
+### 8.3 5xx Error Rate (Time series)
+
+```promql
+sum(rate(http_server_requests_seconds_count{job="service_monitor_backend",status=~"5.."}[1m]))
+```
+
+Settings:
+- Unit: `reqps`
+- Min: `0` (important zero baseline)
+- Suggested thresholds: yellow `0.2`, red `1`
+
+### 8.4 JVM Heap Used (Time series)
+
+```promql
+sum(jvm_memory_used_bytes{job="service_monitor_backend",area="heap"})
+```
+
+Settings:
+- Unit: `bytes (IEC)`
+- Min: `Auto`
+
+### 8.5 JVM Non-Heap Used (Time series)
+
+```promql
+sum(jvm_memory_used_bytes{job="service_monitor_backend",area="nonheap"})
+```
+
+Settings:
+- Unit: `bytes (IEC)`
+- Min: `Auto`
+
+### 8.6 Live JVM Threads (Time series)
+
+```promql
+jvm_threads_live_threads{job="service_monitor_backend"}
+```
+
+Settings:
+- Unit: `none`
+- Min: `0`
+
+### 8.7 Current RPS (Stat)
+
+```promql
+sum(rate(http_server_requests_seconds_count{job="service_monitor_backend"}[1m]))
+```
+
+Settings:
+- Calculation: `Last (not null)`
+- Text mode: `Value and name`
+
+## 9. PostgreSQL Dashboard (Starter Queries)
+
+Service count:
 
 ```sql
 SELECT now() AS ts, count(*) AS services_count
 FROM monitoring.services;
 ```
 
-Panel 2:
+Recent availability events:
 
 ```sql
-SELECT observed_at AS time, count(*) AS error_events
-FROM monitoring.http_error_events
-WHERE observed_at >= now() - interval '24 hours'
-GROUP BY observed_at
-ORDER BY observed_at;
+SELECT s.service_key, e.status, e.observed_at
+FROM monitoring.service_availability_events e
+JOIN monitoring.services s ON s.id = e.service_id
+ORDER BY e.id DESC
+LIMIT 50;
 ```
 
-Panel 3:
+Recent HTTP errors:
 
 ```sql
-SELECT received_at AS time, status, count(*) AS alert_count
-FROM monitoring.alert_events
-WHERE received_at >= now() - interval '24 hours'
-GROUP BY received_at, status
-ORDER BY received_at;
+SELECT s.service_key, h.status_code, h.endpoint, h.observed_at
+FROM monitoring.http_error_events h
+JOIN monitoring.services s ON s.id = h.service_id
+ORDER BY h.id DESC
+LIMIT 50;
 ```
 
-## 9. Alerting
+Recent alerts:
 
-### 9.1 Grafana alerts
+```sql
+SELECT s.service_key, a.alert_name, a.status, a.severity, a.received_at
+FROM monitoring.alert_events a
+LEFT JOIN monitoring.services s ON s.id = a.service_id
+ORDER BY a.id DESC
+LIMIT 50;
+```
 
-Rule examples:
+## 9.1 Service Registry (monitoring.services)
 
-1. Backend down:
-- Query: `up{job="service_monitor_backend"}`
-- Condition: below `1` for `2m`
+Current expected service entries:
 
-2. High 5xx:
-- Query: `sum(rate(http_server_requests_seconds_count{job="service_monitor_backend",status=~"5.."}[1m]))`
-- Condition: above threshold (tune for your traffic)
+- `service-monitor-backend` -> `http://service-monitor-backend:8081`
+- `postgres-db` -> `postgres:5432`
+- `prometheus` -> `http://prometheus:9090/-/healthy`
+- `grafana` -> `http://grafana:3000/api/health`
+- `alertmanager` -> `http://alertmanager:9093/-/healthy`
+- `service-monitor-backend-actuator` -> `http://service-monitor-backend:8081/actuator/health`
 
-Labels example:
-- `service=service-monitor-backend`
-- `severity=critical` or `warning`
-- `env=local`
+Reseed (idempotent):
 
-### 9.2 Email notifications
+```sql
+INSERT INTO monitoring.services (service_key, display_name, base_url, is_active)
+VALUES
+  ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true),
+  ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true),
+  ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true),
+  ('grafana', 'Grafana', 'http://grafana:3000/api/health', true),
+  ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true),
+  ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true)
+ON CONFLICT (service_key) DO UPDATE
+SET
+  display_name = EXCLUDED.display_name,
+  base_url = EXCLUDED.base_url,
+  is_active = EXCLUDED.is_active;
+```
 
-SMTP and alert email routing are configured via environment variables loaded from `.env`.
+Run from PowerShell via Docker:
 
-Used by:
-- Grafana SMTP settings
-- Alertmanager SMTP settings
+```powershell
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "INSERT INTO monitoring.services (service_key, display_name, base_url, is_active) VALUES ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true), ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true), ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true), ('grafana', 'Grafana', 'http://grafana:3000/api/health', true), ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true), ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true) ON CONFLICT (service_key) DO UPDATE SET display_name = EXCLUDED.display_name, base_url = EXCLUDED.base_url, is_active = EXCLUDED.is_active;"
+```
+Quick verify:
 
-Required keys:
-- `SMTP_HOST`
-- `SMTP_FROM`
-- `SMTP_USER`
-- `SMTP_PASSWORD`
-- `ALERT_EMAIL_TO`
+```powershell
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "SELECT id, service_key, display_name, base_url, is_active FROM monitoring.services ORDER BY id;"
+```
+## 10. Alerting
+
+### 10.1 Grafana alerts
+
+Examples:
+- Backend down: `up{job="service_monitor_backend"} < 1` for `2m`
+- High 5xx: `sum(rate(http_server_requests_seconds_count{job="service_monitor_backend",status=~"5.."}[1m]))` above threshold
+
+### 10.2 Prometheus + Alertmanager alerts
+
+Rule file:
+- `monitoring/prometheus/alert.rules.yml`
 
 Alertmanager config flow:
 - Tracked template: `monitoring/alertmanager/alertmanager.yml.tpl`
-- Generated local runtime file (ignored): `monitoring/alertmanager/alertmanager.local.yml`
+- Generated runtime file (ignored): `monitoring/alertmanager/alertmanager.local.yml`
 - Generator script: `monitoring/alertmanager/render-config.ps1`
+- Email template: `monitoring/alertmanager/templates/email.tmpl`
 
-## 10. Common Pitfalls
+Important:
+- `email.tmpl` must define both:
+  - `service_monitor.subject`
+  - `service_monitor.text`
+
+Otherwise emails fail with template errors.
+
+## 11. Python Populator (Active Probing)
+
+Files:
+- `monitoring/postgres/populator/python/Dockerfile`
+- `monitoring/postgres/populator/python/requirements.txt`
+- `monitoring/postgres/populator/python/populate.py`
+
+Current behavior:
+- Reads all active services from `monitoring.services`
+- Probes each service every interval:
+  - HTTP for `http://` or `https://` targets
+  - TCP for `host:port` targets (example: `postgres:5432`)
+- Writes real events (not random):
+  - `monitoring.service_availability_events`
+  - `monitoring.http_error_events` (4xx/5xx)
+  - `monitoring.alert_events` on status transitions
+
+Useful env vars:
+- `PYTHON_POPULATOR_INTERVAL_SECONDS` (already in `.env.example`)
+- `POPULATOR_TIMEOUT_SECONDS` (optional, default `5`)
+
+Shell populator status:
+- `monitoring/postgres/populator/shell/populate.sh` kept for reference
+- shell service remains disabled/commented in compose to avoid duplicate inserts
+
+## 12. Common Pitfalls
 
 1. `/actuator/prometheus` gives 404:
-- Usually wrong `management.*` property keys/typos.
+- wrong `management.*` property keys/typos.
 
 2. Prometheus target down:
-- Check target host format is `service-monitor-backend:8081` (colon, not dot).
+- use `service-monitor-backend:8081` (colon, not dot).
 
 3. Grafana data disappears:
-- Ensure `grafana-data:/var/lib/grafana` is present.
-- Do not run `docker compose down -v` unless you intend to wipe data.
+- ensure `grafana-data:/var/lib/grafana` exists.
+- avoid `docker compose down -v` unless wiping intentionally.
 
 4. PostgreSQL schema not visible:
-- Confirm DB is `service_monitor`.
-- Check schema filter includes `monitoring`.
+- check DB is `service_monitor`.
+- schema filter should include `monitoring`.
 
-5. SQL command fails in PowerShell:
-- SQL must run in Grafana query editor or `psql`, not raw PowerShell.
+5. SQL in PowerShell fails:
+- run SQL in Grafana query editor or via `psql`.
 
 6. Alertmanager env vars not applied:
-- Ensure `monitoring/alertmanager/alertmanager.local.yml` is regenerated after `.env` changes:
+- regenerate config after `.env` edits:
   `powershell -ExecutionPolicy Bypass -File monitoring\alertmanager\render-config.ps1`
 
-## 11. What Is Already Done
+7. Alertmanager emails missing:
+- check logs for template errors:
+  `docker compose logs --tail=100 alertmanager`
+
+## 13. What Is Already Done
 
 - Spring Boot 2.7.18 + Java 1.8 alignment
 - Prometheus metrics pipeline working
 - Grafana dashboards from Prometheus working
 - Downtime/error simulation endpoints implemented
 - Grafana alerting with email working
+- Prometheus + Alertmanager dual alerting path configured
 - PostgreSQL container + schema/tables initialized
 - PostgreSQL datasource connectivity validated
-- Prometheus + Alertmanager dual-email alerting configured
+- Python populator converted to active real probing for all active services
 
-## 12. Next Planned Additions
+## 14. Optional Next Improvements
 
-1. Optional provisioning-as-code for Grafana datasources/dashboards/alerts
-2. Further PostgreSQL dashboard expansion
-3. Ongoing synthetic/real data feed refinement
+1. Provision Grafana datasources/dashboards/alerts as code
+2. Add per-service probe path metadata in DB (for non-root health paths)
+3. Add dedup/rate-limiting strategy for DB alert event inserts
+4. Move sensitive runtime secret handling to a dedicated secret manager
 
-## 13. PostgreSQL Auto-Population (Step 9)
 
-Python option is active and recommended. Shell option is preserved in the repo but disabled in `docker-compose.yml` to avoid collisions.
-
-### 13.1 Option A: Python writer (recommended)
-
-Service: `postgres-populator-python`  
-Profile: `populate-python`
-
-Start with:
-
-```powershell
-docker compose --profile populate-python up -d --build postgres-populator-python
-```
-
-Stop:
-
-```powershell
-docker compose stop postgres-populator-python
-```
-
-Implementation files:
-- `monitoring/postgres/populator/python/Dockerfile`
-- `monitoring/postgres/populator/python/requirements.txt`
-- `monitoring/postgres/populator/python/populate.py`
-
-### 13.2 Option B: Shell + psql writer
-
-Status: disabled in Compose (commented out intentionally).  
-Implementation file kept for reference:
-- `monitoring/postgres/populator/shell/populate.sh`
-
-### 13.3 Behavior
-
-Both writers periodically insert synthetic data into:
-
-- `monitoring.service_availability_events`
-- `monitoring.http_error_events`
-- `monitoring.alert_events`
-
-Default write interval:
-- `20s` (override via `POPULATOR_INTERVAL_SECONDS` env var).
-
-### 13.4 Important
-
-Only the Python populator should run. Shell populator is intentionally not callable from Compose to prevent duplicate inserts.

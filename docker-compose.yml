@@ -28,8 +28,8 @@ services:
     depends_on:
       - postgres
     restart: unless-stopped
-    profiles:
-      - populate-python
+#    profiles:
+#      - populate-python
 
   # Shell populator intentionally disabled to avoid collision with the Python populator.
   # Keep scripts under monitoring/postgres/populator/shell for reference/reuse.
