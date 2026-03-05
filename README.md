@@ -152,6 +152,7 @@ Note:
 
 Initialized by:
 - `monitoring/postgres/init/001_init_schema.sql`
+- `monitoring/postgres/init/002_monitoring_model.sql`
 
 Created schema:
 - `monitoring`
@@ -161,9 +162,19 @@ Created tables:
 - `monitoring.service_availability_events`
 - `monitoring.http_error_events`
 - `monitoring.alert_events`
+- `monitoring.service_checks`
+- `monitoring.service_state`
+- `monitoring.service_incidents`
+- `monitoring.metric_samples`
 
 Important:
 - Init scripts run only on first DB initialization (empty `postgres-data` volume).
+
+If your DB volume already exists, apply step-1 model migration manually:
+
+```powershell
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -f /docker-entrypoint-initdb.d/002_monitoring_model.sql
+```
 
 ## 7. Simulation Endpoints
 
@@ -377,9 +388,12 @@ Current behavior:
   - HTTP for `http://` or `https://` targets
   - TCP for `host:port` targets (example: `postgres:5432`)
 - Writes real events (not random):
-  - `monitoring.service_availability_events`
+  - `monitoring.service_checks` (raw probe checks)
+  - `monitoring.service_state` (latest per-service state)
+  - `monitoring.service_incidents` (open/close lifecycle)
+  - `monitoring.service_availability_events` (compatibility history)
   - `monitoring.http_error_events` (4xx/5xx)
-  - `monitoring.alert_events` on status transitions
+  - `monitoring.alert_events` (status transition alerts)
 
 Useful env vars:
 - `PYTHON_POPULATOR_INTERVAL_SECONDS` (already in `.env.example`)
@@ -434,5 +448,6 @@ Shell populator status:
 2. Add per-service probe path metadata in DB (for non-root health paths)
 3. Add dedup/rate-limiting strategy for DB alert event inserts
 4. Move sensitive runtime secret handling to a dedicated secret manager
+
 
 
