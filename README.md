@@ -154,6 +154,7 @@ Initialized by:
 - `monitoring/postgres/init/001_init_schema.sql`
 - `monitoring/postgres/init/002_monitoring_model.sql`
 - `monitoring/postgres/init/003_service_probe_config.sql`
+- `monitoring/postgres/init/004_populator_source_constraints.sql`
 
 Created schema:
 - `monitoring`
@@ -181,6 +182,12 @@ Apply step-2 probe configuration migration manually:
 
 ```powershell
 docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -f /docker-entrypoint-initdb.d/003_service_probe_config.sql
+```
+
+Apply step-3 deterministic writer hardening migration manually:
+
+```powershell
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -f /docker-entrypoint-initdb.d/004_populator_source_constraints.sql
 ```
 
 ## 7. Simulation Endpoints
@@ -412,6 +419,7 @@ Current behavior:
   - `monitoring.service_availability_events` (compatibility history)
   - `monitoring.http_error_events` (4xx/5xx)
   - `monitoring.alert_events` (status transition alerts)
+- Writer-tagged records use `source='POPULATOR'` / `alert_source='POPULATOR'` for clear provenance
 
 Useful env vars:
 - `PYTHON_POPULATOR_INTERVAL_SECONDS` (already in `.env.example`)

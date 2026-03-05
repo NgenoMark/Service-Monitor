@@ -299,7 +299,7 @@ def insert_availability_event(cur, service_id: int, status: str, details: dict, 
         INSERT INTO monitoring.service_availability_events
             (service_id, source, status, observed_at, details)
         VALUES
-            (%s, 'MANUAL', %s, %s, %s::jsonb)
+            (%s, 'POPULATOR', %s, %s, %s::jsonb)
         """,
         (service_id, status, observed_at, json.dumps(details)),
     )
@@ -319,7 +319,7 @@ def insert_http_error_event(cur, service_id: int, base_url: str, details: dict, 
         INSERT INTO monitoring.http_error_events
             (service_id, source, endpoint, method, status_code, error_count, window_seconds, observed_at, details)
         VALUES
-            (%s, 'MANUAL', %s, 'GET', %s, 1, %s, %s, %s::jsonb)
+            (%s, 'POPULATOR', %s, 'GET', %s, 1, %s, %s, %s::jsonb)
         """,
         (service_id, endpoint, int(http_status), interval_seconds, observed_at, json.dumps(details)),
     )
@@ -451,7 +451,7 @@ def insert_alert_transition(cur, service_id: int, service_key: str, previous_sta
         INSERT INTO monitoring.alert_events
             (service_id, alert_source, alert_name, severity, status, message, labels, starts_at, ends_at)
         VALUES
-            (%s, 'PROMETHEUS', 'BackendDown', %s, %s, %s, %s::jsonb, %s, %s)
+            (%s, 'POPULATOR', 'ServiceDownTransition', %s, %s, %s, %s::jsonb, %s, %s)
         """,
         (service_id, severity, alert_status, message, json.dumps(labels), observed_at, ends_at),
     )
