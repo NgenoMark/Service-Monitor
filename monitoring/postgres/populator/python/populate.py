@@ -4,7 +4,7 @@ import socket
 import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 import psycopg2
@@ -27,7 +27,16 @@ def get_connection():
 def fetch_active_services(cur):
     cur.execute(
         """
-        SELECT id, service_key, display_name, base_url
+        SELECT
+            id,
+            service_key,
+            display_name,
+            base_url,
+            probe_type,
+            probe_path,
+            expected_status_codes,
+            timeout_seconds,
+            check_interval_seconds
         FROM monitoring.services
         WHERE is_active = TRUE
         ORDER BY id
@@ -36,10 +45,10 @@ def fetch_active_services(cur):
     return cur.fetchall()
 
 
-def get_last_status(cur, service_id: int):
+def get_service_state(cur, service_id: int):
     cur.execute(
         """
-        SELECT current_status
+        SELECT current_status, last_check_at, consecutive_failures
         FROM monitoring.service_state
         WHERE service_id = %s
         LIMIT 1
@@ -47,10 +56,101 @@ def get_last_status(cur, service_id: int):
         (service_id,),
     )
     row = cur.fetchone()
-    return row[0] if row else None
+    if not row:
+        return None, None, 0
+    return row[0], row[1], row[2] or 0
 
 
-def check_http(url: str, timeout_seconds: int):
+def parse_expected_status_codes(spec: str):
+    tokens = (spec or "200-399").replace(" ", "").split(",")
+    exact = set()
+    ranges = []
+
+    for token in tokens:
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            try:
+                start = int(start_text)
+                end = int(end_text)
+            except ValueError:
+                continue
+            if start > end:
+                start, end = end, start
+            ranges.append((start, end))
+        else:
+            try:
+                exact.add(int(token))
+            except ValueError:
+                continue
+
+    if not exact and not ranges:
+        ranges.append((200, 399))
+
+    return exact, ranges
+
+
+def is_expected_http_status(code: int, expected_spec: str) -> bool:
+    exact, ranges = parse_expected_status_codes(expected_spec)
+    if code in exact:
+        return True
+    for start, end in ranges:
+        if start <= code <= end:
+            return True
+    return False
+
+
+def build_http_url(base_url: str, probe_path: str):
+    raw = (base_url or "").strip()
+    if not raw:
+        return None, "base_url is empty"
+
+    if not raw.startswith("http://") and not raw.startswith("https://"):
+        raw = f"http://{raw}"
+
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return None, "invalid HTTP target"
+
+    if probe_path and probe_path.strip():
+        path = probe_path.strip()
+        if not path.startswith("/"):
+            path = f"/{path}"
+    else:
+        path = parsed.path if parsed.path else "/"
+
+    final_url = urlunparse((parsed.scheme or "http", parsed.netloc, path, "", "", ""))
+    return final_url, None
+
+
+def parse_tcp_target(base_url: str):
+    raw = (base_url or "").strip()
+    if not raw:
+        return None, None, "base_url is empty"
+
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        host_port = parsed.netloc
+    else:
+        host_port = raw.split("/", 1)[0]
+
+    if ":" not in host_port:
+        return None, None, "missing host:port"
+
+    host, port_text = host_port.rsplit(":", 1)
+    try:
+        port = int(port_text)
+    except ValueError:
+        return None, None, f"invalid port: {port_text}"
+
+    if not host:
+        return None, None, "missing host"
+
+    return host, port, None
+
+
+def check_http(url: str, timeout_seconds: int, expected_status_codes: str):
     req = Request(url, method="GET")
     req.add_header("User-Agent", "service-monitor-populator/1.0")
     started = time.monotonic()
@@ -59,7 +159,7 @@ def check_http(url: str, timeout_seconds: int):
         with urlopen(req, timeout=timeout_seconds) as response:
             code = int(response.getcode())
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if 200 <= code < 400:
+            if is_expected_http_status(code, expected_status_codes):
                 status = "UP"
             elif code >= 500:
                 status = "DOWN"
@@ -69,7 +169,9 @@ def check_http(url: str, timeout_seconds: int):
     except HTTPError as http_err:
         code = int(http_err.code)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        if code >= 500:
+        if is_expected_http_status(code, expected_status_codes):
+            status = "UP"
+        elif code >= 500:
             status = "DOWN"
         else:
             status = "DEGRADED"
@@ -90,68 +192,79 @@ def check_tcp(host: str, port: int, timeout_seconds: int):
         return "DOWN", str(exc), elapsed_ms
 
 
-def probe_service(base_url: str, timeout_seconds: int):
+def should_probe(last_check_at: datetime, interval_seconds: int, now: datetime) -> bool:
+    if last_check_at is None:
+        return True
+    elapsed = (now - last_check_at).total_seconds()
+    return elapsed >= interval_seconds
+
+
+def probe_service(service_row, default_timeout_seconds: int):
+    (
+        _service_id,
+        service_key,
+        _display_name,
+        base_url,
+        probe_type,
+        probe_path,
+        expected_status_codes,
+        timeout_seconds,
+        check_interval_seconds,
+    ) = service_row
+
     observed_at = datetime.now(timezone.utc).isoformat()
+    timeout = int(timeout_seconds or default_timeout_seconds)
+    configured_probe = (probe_type or "HTTP").upper()
 
-    if not base_url:
-        return "UNKNOWN", {
-            "probe": "none",
-            "error": "base_url is empty",
-            "observed_at": observed_at,
-            "response_time_ms": None,
-            "http_status": None,
-            "target": None,
-        }
-
-    raw = base_url.strip()
-
-    if raw.startswith("http://") or raw.startswith("https://"):
-        status, http_code, error_text, response_time_ms = check_http(raw, timeout_seconds)
-        return status, {
-            "probe": "http",
-            "request_url": raw,
-            "target": raw,
-            "http_status": http_code,
-            "error": error_text,
-            "response_time_ms": response_time_ms,
-            "observed_at": observed_at,
-        }
-
-    if ":" in raw and "/" not in raw:
-        host, port_text = raw.rsplit(":", 1)
-        try:
-            port = int(port_text)
-        except ValueError:
-            return "UNKNOWN", {
-                "probe": "tcp",
-                "target": raw,
-                "error": f"invalid port: {port_text}",
-                "observed_at": observed_at,
-                "response_time_ms": None,
-                "http_status": None,
-            }
-
-        status, error_text, response_time_ms = check_tcp(host, port, timeout_seconds)
-        return status, {
-            "probe": "tcp",
-            "target": raw,
-            "error": error_text,
-            "observed_at": observed_at,
-            "response_time_ms": response_time_ms,
-            "http_status": None,
-        }
-
-    fallback_url = f"http://{raw}"
-    status, http_code, error_text, response_time_ms = check_http(fallback_url, timeout_seconds)
-    return status, {
-        "probe": "http",
-        "request_url": fallback_url,
-        "target": fallback_url,
-        "http_status": http_code,
-        "error": error_text,
-        "response_time_ms": response_time_ms,
+    details = {
+        "configured_probe_type": configured_probe,
+        "configured_probe_path": probe_path,
+        "configured_expected_status_codes": expected_status_codes,
+        "configured_timeout_seconds": timeout,
+        "configured_check_interval_seconds": int(check_interval_seconds or 15),
+        "service_key": service_key,
         "observed_at": observed_at,
     }
+
+    if configured_probe == "HTTP":
+        request_url, url_err = build_http_url(base_url, probe_path)
+        if url_err:
+            details.update({"probe": "http", "target": base_url, "error": url_err, "http_status": None, "response_time_ms": None})
+            return "UNKNOWN", details
+
+        status, http_code, error_text, response_time_ms = check_http(request_url, timeout, expected_status_codes)
+        details.update(
+            {
+                "probe": "http",
+                "request_url": request_url,
+                "target": request_url,
+                "http_status": http_code,
+                "error": error_text,
+                "response_time_ms": response_time_ms,
+            }
+        )
+        return status, details
+
+    if configured_probe == "TCP":
+        host, port, parse_err = parse_tcp_target(base_url)
+        if parse_err:
+            details.update({"probe": "tcp", "target": base_url, "error": parse_err, "http_status": None, "response_time_ms": None})
+            return "UNKNOWN", details
+
+        status, error_text, response_time_ms = check_tcp(host, port, timeout)
+        details.update(
+            {
+                "probe": "tcp",
+                "target": f"{host}:{port}",
+                "error": error_text,
+                "response_time_ms": response_time_ms,
+                "http_status": None,
+            }
+        )
+        return status, details
+
+    details.update({"probe": "none", "target": base_url, "error": f"unsupported probe_type: {configured_probe}", "http_status": None, "response_time_ms": None})
+    return "UNKNOWN", details
 
 
 def insert_service_check(cur, service_id: int, status: str, details: dict, observed_at: datetime):
@@ -212,21 +325,20 @@ def insert_http_error_event(cur, service_id: int, base_url: str, details: dict, 
     )
 
 
-def upsert_service_state(cur, service_id: int, previous_status: str, current_status: str, details: dict, observed_at: datetime):
+def upsert_service_state(
+    cur,
+    service_id: int,
+    previous_status: str,
+    previous_consecutive_failures: int,
+    current_status: str,
+    details: dict,
+    observed_at: datetime,
+):
     changed = previous_status is None or previous_status != current_status
 
     if current_status == "DOWN":
         if previous_status == "DOWN":
-            cur.execute(
-                """
-                SELECT COALESCE(consecutive_failures, 0)
-                FROM monitoring.service_state
-                WHERE service_id = %s
-                """,
-                (service_id,),
-            )
-            row = cur.fetchone()
-            consecutive_failures = (row[0] if row else 0) + 1
+            consecutive_failures = int(previous_consecutive_failures or 0) + 1
         else:
             consecutive_failures = 1
     else:
@@ -346,23 +458,50 @@ def insert_alert_transition(cur, service_id: int, service_key: str, previous_sta
 
 
 def main():
-    interval_seconds = int(env("POPULATOR_INTERVAL_SECONDS", "15"))
-    timeout_seconds = int(env("POPULATOR_TIMEOUT_SECONDS", "5"))
+    default_interval_seconds = int(env("POPULATOR_INTERVAL_SECONDS", "15"))
+    default_timeout_seconds = int(env("POPULATOR_TIMEOUT_SECONDS", "5"))
 
     while True:
         try:
             with get_connection() as conn:
                 with conn.cursor() as cur:
                     services = fetch_active_services(cur)
-                    for service_id, service_key, _display_name, base_url in services:
-                        observed_at = datetime.now(timezone.utc)
-                        previous_status = get_last_status(cur, service_id)
-                        current_status, details = probe_service(base_url, timeout_seconds)
+
+                    for service in services:
+                        (
+                            service_id,
+                            service_key,
+                            _display_name,
+                            base_url,
+                            _probe_type,
+                            _probe_path,
+                            _expected_status_codes,
+                            _timeout_seconds,
+                            check_interval_seconds,
+                        ) = service
+
+                        previous_status, last_check_at, previous_failures = get_service_state(cur, service_id)
+                        interval = int(check_interval_seconds or default_interval_seconds)
+                        now = datetime.now(timezone.utc)
+
+                        if not should_probe(last_check_at, interval, now):
+                            continue
+
+                        observed_at = now
+                        current_status, details = probe_service(service, default_timeout_seconds)
 
                         insert_service_check(cur, service_id, current_status, details, observed_at)
                         insert_availability_event(cur, service_id, current_status, details, observed_at)
-                        insert_http_error_event(cur, service_id, base_url, details, interval_seconds, observed_at)
-                        upsert_service_state(cur, service_id, previous_status, current_status, details, observed_at)
+                        insert_http_error_event(cur, service_id, base_url, details, interval, observed_at)
+                        upsert_service_state(
+                            cur,
+                            service_id,
+                            previous_status,
+                            previous_failures,
+                            current_status,
+                            details,
+                            observed_at,
+                        )
                         sync_incident_transition(
                             cur,
                             service_id,
@@ -381,11 +520,12 @@ def main():
                             details,
                             observed_at,
                         )
+
                 conn.commit()
         except Exception as exc:
             print(f"[populator] write cycle failed: {exc}", flush=True)
 
-        time.sleep(interval_seconds)
+        time.sleep(default_interval_seconds)
 
 
 if __name__ == "__main__":

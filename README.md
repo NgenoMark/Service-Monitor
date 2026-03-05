@@ -153,6 +153,7 @@ Note:
 Initialized by:
 - `monitoring/postgres/init/001_init_schema.sql`
 - `monitoring/postgres/init/002_monitoring_model.sql`
+- `monitoring/postgres/init/003_service_probe_config.sql`
 
 Created schema:
 - `monitoring`
@@ -174,6 +175,12 @@ If your DB volume already exists, apply step-1 model migration manually:
 
 ```powershell
 docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -f /docker-entrypoint-initdb.d/002_monitoring_model.sql
+```
+
+Apply step-2 probe configuration migration manually:
+
+```powershell
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -f /docker-entrypoint-initdb.d/003_service_probe_config.sql
 ```
 
 ## 7. Simulation Endpoints
@@ -321,33 +328,46 @@ Current expected service entries:
 - `alertmanager` -> `http://alertmanager:9093/-/healthy`
 - `service-monitor-backend-actuator` -> `http://service-monitor-backend:8081/actuator/health`
 
+Per-service probe config fields (in `monitoring.services`):
+- `probe_type` (`HTTP` or `TCP`)
+- `probe_path` (HTTP only, optional)
+- `expected_status_codes` (example: `200,204,301-304`)
+- `timeout_seconds`
+- `check_interval_seconds`
+
 Reseed (idempotent):
 
 ```sql
-INSERT INTO monitoring.services (service_key, display_name, base_url, is_active)
+INSERT INTO monitoring.services
+    (service_key, display_name, base_url, is_active, probe_type, probe_path, expected_status_codes, timeout_seconds, check_interval_seconds)
 VALUES
-  ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true),
-  ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true),
-  ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true),
-  ('grafana', 'Grafana', 'http://grafana:3000/api/health', true),
-  ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true),
-  ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true)
+  ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true, 'HTTP', '/actuator/health', '200-399', 5, 15),
+  ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true, 'TCP', NULL, '200-399', 3, 15),
+  ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true, 'HTTP', NULL, '200-399', 5, 15),
+  ('grafana', 'Grafana', 'http://grafana:3000/api/health', true, 'HTTP', NULL, '200-399', 5, 15),
+  ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true, 'HTTP', NULL, '200-399', 5, 15),
+  ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true, 'HTTP', NULL, '200-399', 5, 15)
 ON CONFLICT (service_key) DO UPDATE
 SET
   display_name = EXCLUDED.display_name,
   base_url = EXCLUDED.base_url,
-  is_active = EXCLUDED.is_active;
+  is_active = EXCLUDED.is_active,
+  probe_type = EXCLUDED.probe_type,
+  probe_path = EXCLUDED.probe_path,
+  expected_status_codes = EXCLUDED.expected_status_codes,
+  timeout_seconds = EXCLUDED.timeout_seconds,
+  check_interval_seconds = EXCLUDED.check_interval_seconds;
 ```
 
 Run from PowerShell via Docker:
 
 ```powershell
-docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "INSERT INTO monitoring.services (service_key, display_name, base_url, is_active) VALUES ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true), ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true), ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true), ('grafana', 'Grafana', 'http://grafana:3000/api/health', true), ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true), ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true) ON CONFLICT (service_key) DO UPDATE SET display_name = EXCLUDED.display_name, base_url = EXCLUDED.base_url, is_active = EXCLUDED.is_active;"
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "INSERT INTO monitoring.services (service_key, display_name, base_url, is_active, probe_type, probe_path, expected_status_codes, timeout_seconds, check_interval_seconds) VALUES ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', true, 'HTTP', '/actuator/health', '200-399', 5, 15), ('postgres-db', 'PostgreSQL Database', 'postgres:5432', true, 'TCP', NULL, '200-399', 3, 15), ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', true, 'HTTP', NULL, '200-399', 5, 15), ('grafana', 'Grafana', 'http://grafana:3000/api/health', true, 'HTTP', NULL, '200-399', 5, 15), ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', true, 'HTTP', NULL, '200-399', 5, 15), ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', true, 'HTTP', NULL, '200-399', 5, 15) ON CONFLICT (service_key) DO UPDATE SET display_name = EXCLUDED.display_name, base_url = EXCLUDED.base_url, is_active = EXCLUDED.is_active, probe_type = EXCLUDED.probe_type, probe_path = EXCLUDED.probe_path, expected_status_codes = EXCLUDED.expected_status_codes, timeout_seconds = EXCLUDED.timeout_seconds, check_interval_seconds = EXCLUDED.check_interval_seconds;"
 ```
 Quick verify:
 
 ```powershell
-docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "SELECT id, service_key, display_name, base_url, is_active FROM monitoring.services ORDER BY id;"
+docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "SELECT id, service_key, base_url, probe_type, probe_path, expected_status_codes, timeout_seconds, check_interval_seconds, is_active FROM monitoring.services ORDER BY id;"
 ```
 ## 10. Alerting
 
@@ -384,9 +404,7 @@ Files:
 
 Current behavior:
 - Reads all active services from `monitoring.services`
-- Probes each service every interval:
-  - HTTP for `http://` or `https://` targets
-  - TCP for `host:port` targets (example: `postgres:5432`)
+- Uses per-service probe settings from DB (`probe_type`, `probe_path`, `expected_status_codes`, `timeout_seconds`, `check_interval_seconds`)
 - Writes real events (not random):
   - `monitoring.service_checks` (raw probe checks)
   - `monitoring.service_state` (latest per-service state)
