@@ -68,6 +68,12 @@ CREATE INDEX IF NOT EXISTS idx_alert_events_service_time
 CREATE INDEX IF NOT EXISTS idx_alert_events_status_time
     ON monitoring.alert_events (status, received_at DESC);
 
-INSERT INTO monitoring.services (service_key, display_name, base_url)
-VALUES ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081')
+INSERT INTO monitoring.services (service_key, display_name, base_url, is_active)
+VALUES
+    ('service-monitor-backend', 'Service Monitor Backend', 'http://service-monitor-backend:8081', TRUE),
+    ('postgres-db', 'PostgreSQL Database', 'postgres:5432', TRUE),
+    ('prometheus', 'Prometheus', 'http://prometheus:9090/-/healthy', TRUE),
+    ('grafana', 'Grafana', 'http://grafana:3000/api/health', TRUE),
+    ('alertmanager', 'Alertmanager', 'http://alertmanager:9093/-/healthy', TRUE),
+    ('service-monitor-backend-actuator', 'Service Monitor Backend Actuator', 'http://service-monitor-backend:8081/actuator/health', TRUE)
 ON CONFLICT (service_key) DO NOTHING;

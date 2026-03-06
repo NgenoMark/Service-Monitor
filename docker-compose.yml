@@ -3,7 +3,7 @@ services:
     image: postgres:16
     container_name: postgres
     ports:
-      - "5432:5432"
+      - "55432:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
@@ -11,6 +11,12 @@ services:
     volumes:
       - ./monitoring/postgres/init:/docker-entrypoint-initdb.d:ro
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     restart: unless-stopped
 
   postgres-populator-python:
@@ -26,10 +32,11 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD}
       POPULATOR_INTERVAL_SECONDS: ${PYTHON_POPULATOR_INTERVAL_SECONDS}
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
-#    profiles:
-#      - populate-python
+   #profiles:
+   #  - populate-python
 
   # Shell populator intentionally disabled to avoid collision with the Python populator.
   # Keep scripts under monitoring/postgres/populator/shell for reference/reuse.
@@ -62,6 +69,9 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8081:8081"
     restart: unless-stopped

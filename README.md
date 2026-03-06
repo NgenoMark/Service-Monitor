@@ -148,6 +148,20 @@ Use these values in Grafana (container-to-container):
 Note:
 - `localhost` is wrong inside Grafana container for PostgreSQL datasource.
 
+### 5.3 Local IDE / pgAdmin connection
+
+For host machine tools (IntelliJ, pgAdmin), use the mapped host port from `docker-compose.yml`.
+
+- Host: `localhost` (or `127.0.0.1`)
+- Port: `55432` (if your compose mapping is `55432:5432`)
+- Database: `service_monitor`
+- User: `service_monitor_user`
+- Password: `service_monitor_pass`
+
+Important:
+- `postgres:5432` is for container-to-container traffic only.
+- `localhost:55432` is for host machine tools only.
+
 ## 6. PostgreSQL Schema and Tables
 
 Initialized by:
@@ -171,6 +185,7 @@ Created tables:
 
 Important:
 - Init scripts run only on first DB initialization (empty `postgres-data` volume).
+- `001_init_schema.sql` now seeds all core services by default on fresh volume creation.
 
 If your DB volume already exists, apply step-1 model migration manually:
 
@@ -376,6 +391,24 @@ Quick verify:
 ```powershell
 docker compose exec -T postgres psql -U service_monitor_user -d service_monitor -c "SELECT id, service_key, base_url, probe_type, probe_path, expected_status_codes, timeout_seconds, check_interval_seconds, is_active FROM monitoring.services ORDER BY id;"
 ```
+
+### 9.2 After Volume Reset
+
+If you run:
+
+```powershell
+docker compose down
+docker volume rm service_monitor_postgres-data
+docker compose up -d
+```
+
+Then PostgreSQL recreates everything automatically:
+- schema/tables from init scripts `001` to `004`
+- default six service rows in `monitoring.services` (from `001`)
+
+What is not auto-restored by PostgreSQL reset:
+- Grafana dashboards/datasources/alert rules if `grafana-data` is also removed
+- any manual UI-only configuration not stored as code
 ## 10. Alerting
 
 ### 10.1 Grafana alerts
