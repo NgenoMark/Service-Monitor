@@ -435,6 +435,20 @@ Important:
 
 Otherwise emails fail with template errors.
 
+### 10.3 Alertmanager webhook ingestion (Step 4)
+
+Spring Boot endpoint:
+- `POST /api/alerts/alertmanager`
+
+Alertmanager is configured to forward alerts to the backend via webhook, and the backend persists alerts into `monitoring.alert_events` with `alert_source='PROMETHEUS'`.
+
+After changing `.env`, regenerate Alertmanager config:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File monitoring\alertmanager\render-config.ps1
+docker compose restart alertmanager
+```
+
 ## 11. Python Populator (Active Probing)
 
 Files:

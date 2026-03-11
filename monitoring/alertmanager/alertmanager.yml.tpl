@@ -23,3 +23,6 @@ receivers:
         headers:
           subject: '{{ template "service_monitor.subject" . }}'
         text: '{{ template "service_monitor.text" . }}'
+    webhook_configs:
+      - url: 'http://service-monitor-backend:8081/api/alerts/alertmanager'
+        send_resolved: true
