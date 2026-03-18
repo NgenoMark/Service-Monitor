@@ -227,6 +227,18 @@ docker compose start service-monitor-backend
 
 ## 8. Prometheus Dashboard (Recommended Panels)
 
+### 8.0 Prometheus Queries In Use
+
+```promql
+up{job="service_monitor_backend",instance="service-monitor-backend:8081"}
+sum(rate(http_server_requests_seconds_count{job="service_monitor_backend"}[1m]))
+sum(rate(http_server_requests_seconds_count{job="service_monitor_backend",status=~"5.."}[1m]))
+sum(jvm_memory_used_bytes{job="service_monitor_backend",area="heap"})
+sum(jvm_memory_used_bytes{job="service_monitor_backend",area="nonheap"})
+jvm_threads_live_threads{job="service_monitor_backend"}
+up{job="service_monitor_backend"}
+```
+
 ### 8.1 Backend Status (Stat)
 
 ```promql
@@ -337,6 +349,102 @@ FROM monitoring.alert_events a
 LEFT JOIN monitoring.services s ON s.id = a.service_id
 ORDER BY a.id DESC
 LIMIT 50;
+```
+
+### 9.0 PostgreSQL Queries In Use (Current Dashboard)
+
+Registered services:
+
+```sql
+SELECT COUNT(*)::bigint AS value
+FROM monitoring.services
+WHERE is_active = true;
+```
+
+Service checks by status (time series):
+
+```sql
+SELECT
+  date_trunc('minute', observed_at) AS time,
+  status AS metric,
+  COUNT(*)::bigint AS value
+FROM monitoring.service_checks
+WHERE observed_at BETWEEN $__timeFrom() AND $__timeTo()
+GROUP BY 1,2
+ORDER BY 1;
+```
+
+HTTP error events (4xx vs 5xx):
+
+```sql
+SELECT
+  date_trunc('minute', observed_at) AS time,
+  CASE
+    WHEN status_code BETWEEN 400 AND 499 THEN '4xx'
+    WHEN status_code BETWEEN 500 AND 599 THEN '5xx'
+    ELSE 'other'
+  END AS metric,
+  sum(error_count)::bigint AS value
+FROM monitoring.http_error_events
+WHERE observed_at BETWEEN $__timeFrom() AND $__timeTo()
+  AND source = 'POPULATOR'
+GROUP BY 1,2
+ORDER BY 1;
+```
+
+Alert events (FIRING vs RESOLVED):
+
+```sql
+SELECT
+  date_trunc('minute', received_at) AS time,
+  status AS metric,
+  count(*)::bigint AS value
+FROM monitoring.alert_events
+WHERE received_at BETWEEN $__timeFrom() AND $__timeTo()
+  AND alert_source = 'PROMETHEUS'
+GROUP BY 1,2
+ORDER BY 1;
+```
+
+Latest alert incidents:
+
+```sql
+SELECT
+  received_at,
+  alert_source,
+  alert_name,
+  severity,
+  status,
+  message
+FROM monitoring.alert_events
+ORDER BY received_at DESC
+LIMIT 50;
+```
+
+HTTP error incidents:
+
+```sql
+SELECT
+  e.observed_at,
+  s.display_name AS service,
+  e.endpoint,
+  e.method,
+  e.status_code,
+  e.error_count,
+  e.source
+FROM monitoring.http_error_events e
+JOIN monitoring.services s ON s.id = e.service_id
+ORDER BY e.observed_at DESC
+LIMIT 50;
+```
+
+Alerts currently firing (last 24 hours):
+
+```sql
+SELECT count(*)::bigint AS value
+FROM monitoring.alert_events
+WHERE status = 'FIRING'
+  AND received_at >= now() - interval '24 hours';
 ```
 
 ## 9.1 Service Registry (monitoring.services)
@@ -521,6 +629,25 @@ Shell populator status:
 2. Add per-service probe path metadata in DB (for non-root health paths)
 3. Add dedup/rate-limiting strategy for DB alert event inserts
 4. Move sensitive runtime secret handling to a dedicated secret manager
+
+## 15. Grafana Dashboard Provisioning
+
+Grafana is configured to auto-load dashboards from JSON files at startup.
+
+Files:
+- `monitoring/grafana/dashboards/prometheus_dashboard.json`
+- `monitoring/grafana/dashboards/postgres_dashboard.json`
+- `monitoring/grafana/provisioning/dashboards/dashboards.yml`
+
+Behavior:
+- Provisioning runs on every Grafana start.
+- If a dashboard with the same UID exists, it will be updated from the JSON file.
+- UI edits are allowed (`allowUiUpdates: true`) but will be overwritten if the JSON changes.
+
+To apply:
+```powershell
+docker compose up -d --build grafana
+```
 
 
 
