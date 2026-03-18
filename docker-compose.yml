@@ -110,6 +110,9 @@ services:
       - prometheus
     volumes:
       - grafana-data:/var/lib/grafana
+      # Provisioning disabled for now; keep files in repo for later enable.
+      # - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       GF_SMTP_ENABLED: ${GF_SMTP_ENABLED}
       GF_SMTP_HOST: ${SMTP_HOST}
